@@ -1,4 +1,4 @@
-name: Auto-Create & Build HayDay Bot APK
+name: HayDay Bot Final Build
 
 on:
   push:
@@ -24,7 +24,7 @@ jobs:
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
 
-    - name: Generate Project Files
+    - name: Generate Project Files & Structure
       run: |
         mkdir -p app/src/main/java/com/korobov/haydaybot/data
         mkdir -p app/src/main/java/com/korobov/haydaybot/engine
@@ -388,7 +388,6 @@ jobs:
         cat << 'EOF' > app/src/main/java/com/korobov/haydaybot/engine/ImageMatcher.kt
         package com.korobov.haydaybot.engine
         import android.graphics.Bitmap
-        import android.graphics.Color
         class ImageMatcher {
             fun prepareBitmap(hwBitmap: Bitmap): Bitmap {
                 return if (hwBitmap.config == Bitmap.Config.HARDWARE) hwBitmap.copy(Bitmap.Config.ARGB_8888, false) else hwBitmap
@@ -501,7 +500,6 @@ jobs:
         import com.korobov.haydaybot.engine.GeometryEngine
         import com.korobov.haydaybot.engine.GestureEngine
         import com.korobov.haydaybot.ui.OverlayHudManager
-        import com.korobov.haydaybot.utils.LogManager
         import kotlinx.coroutines.*
         import kotlin.coroutines.CoroutineContext
         class HayDayAccessibilityService : AccessibilityService(), CoroutineScope {
