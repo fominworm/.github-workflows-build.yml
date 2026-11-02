@@ -541,7 +541,6 @@ jobs:
                   if (pts.size < 2) return pts
                   return when (mode) {
                       1 -> {
-                          // Режим 1: Медленно (больше промежуточных точек)
                           val res = ArrayList<P>(pts.size * 2)
                           for (i in 0 until pts.size - 1) {
                               val a = pts[i]; val b = pts[i + 1]
@@ -552,11 +551,9 @@ jobs:
                           res
                       }
                       2 -> {
-                          // Режим 2: По шагам
                           pts.filterIndexed { idx, _ -> idx == 0 || idx == pts.size - 1 || idx % 2 == 0 }
                       }
                       3 -> {
-                          // Режим 3: Как человек (плавающая кривая + гауссов тремор пальца)
                           val res = ArrayList<P>(pts.size * 2)
                           for (i in pts.indices) {
                               val cur = pts[i]
@@ -602,8 +599,6 @@ jobs:
           import kotlin.math.sqrt
 
           object Vision {
-              // Берем область 20x16 в ВЕРХНЕЙ части иконки (смещение вверх от цифр количества),
-              // чтобы цифры запаса (например, 10 vs 240) и бежевый фон слота не портили распознавание!
               private const val PW = 20
               private const val PH = 16
               private const val EXPECTED_LEN = PW * PH
@@ -640,10 +635,6 @@ jobs:
                   return best <= maxDist
               }
 
-              /**
-               * Извлекает патч 20x16 из верхней части иконки (dy от -14 до +2),
-               * игнорируя нижнюю строчку с цифрами количества товара.
-               */
               fun extractCropIconPatch(bmp: Bitmap, center: P): IntArray {
                   val cx = center.x.roundToInt()
                   val cy = center.y.roundToInt()
@@ -659,10 +650,6 @@ jobs:
                   return out
               }
 
-              /**
-               * Комбинированное сравнение иконки культуры с маскированием фона меню силоса
-               * и весом по цветовым каналам + хроматичности (R-B, G-B).
-               */
               fun findBestCropCell(bmp: Bitmap, candidates: List<P>, refPatch: IntArray?, threshold: Double = 82.0): P? {
                   if (candidates.isEmpty()) return null
                   if (refPatch == null || refPatch.size != EXPECTED_LEN) return candidates.first()
@@ -690,12 +677,10 @@ jobs:
                                       val r1 = Color.red(px); val g1 = Color.green(px); val b1 = Color.blue(px)
                                       val r2 = (rf shr 16) and 0xFF; val g2 = (rf shr 8) and 0xFF; val b2 = rf and 0xFF
 
-                                      // Пиксели с высокой насыщенностью (сама культура, а не серый/бежевый фон) получают тройной вес
                                       val sat2 = maxOf(r2, g2, b2) - minOf(r2, g2, b2)
                                       val w = if (sat2 > 38) 3.0 else 0.7
 
                                       val rgbDiff = (abs(r1 - r2) + abs(g1 - g2) + abs(b1 - b2)) / 3.0
-                                      // Хроматическая разница (отличает желтую пшеницу от кукурузы/моркови/сои)
                                       val chromaDiff = (abs((r1 - b1) - (r2 - b2)) + abs((g1 - b1) - (g2 - b2))) * 0.65
 
                                       weightedErr += (rgbDiff + chromaDiff) * w
@@ -914,10 +899,6 @@ jobs:
                   showIdleUi()
               }
 
-              /**
-               * Контроль переднего плана: если пользователь свернул Hay Day или открылось чужое приложение,
-               * бот ставит действия на паузу и не кликает по рабочему столу/мессенджерам.
-               */
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {
                   if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
                       val pkg = event.packageName?.toString() ?: return
@@ -1088,7 +1069,6 @@ jobs:
                           btnSecondary.visibility = View.GONE
                       }
                       Kind.TAP -> {
-                          // Исправлен баг дублирования 1-го слота при повторной калибровке
                           if (s.fresh && s.role != null && s.role.multi) cfg.clear(s.role)
                           armMark(true)
                           btnPrimary.text = "Жду тапа..."; btnPrimary.setOnClickListener(null)
@@ -1182,7 +1162,6 @@ jobs:
                           waitUntilGameForeground()
                           if (!running) break
 
-                          // Анти-бан перерыв каждые 35–50 минут на 2–3.5 минуты
                           if (System.currentTimeMillis() - sessionStartMs >= nextBreakAfterMs) {
                               val breakSec = 120 + rng.nextInt(90)
                               for (s in breakSec downTo 1) {
@@ -1205,7 +1184,6 @@ jobs:
                                   sellInShop(gain)
                               }
 
-                              // Умный сбор: если пшеница чуть опоздала или выскочил попап, ждет и повторяет, а не сеет вслепую!
                               status("Круг $cycle: сбор поля ${f + 1}...")
                               val harvested = doHarvestWithRetry(f, maxRetries = 5)
                               if (harvested && cfg.cells > 0) {
@@ -1261,10 +1239,6 @@ jobs:
                   return true
               }
 
-              /**
-               * Ждет созревания и проверяет серп (до maxRetries попыток),
-               * закрывая случайные попапы при промахе проверки.
-               */
               private fun doHarvestWithRetry(f: Int, maxRetries: Int): Boolean {
                   val hp = cfg.first(T.HFIELD, f) ?: cfg.first(T.FIELD, f) ?: return false
                   val sp = cfg.first(T.SICKLE, f) ?: return false
@@ -1303,7 +1277,6 @@ jobs:
                               holdSweepReturnSync(sp, hp, snake, Geo.jitterDelay(cfg.holdMs.toLong(), cfg.speedHarvest), cfg.speedHarvest, cfg.returnHand > 0)
                               lockGround()
 
-                              // Если после взмаха серпом выскочило окно переполнения силоса (виден крестик CLOSE)
                               val closePt = cfg.first(T.CLOSE, 0)
                               val refClose = cfg.getRef(T.CLOSE, 0)
                               if (cfg.useRec && closePt != null && refClose != null) {
@@ -1311,7 +1284,7 @@ jobs:
                                       val popup = Vision.matchesColor(bmp, closePt, refClose, 48.0)
                                       bmp.recycle()
                                       if (popup) {
-                                          status("⚠ Силос переполнился во время сбора! Разгружаю...")
+                                          status("⚠ Силос переполнился! Разгружаю...")
                                           tapSync(Geo.jitterTap(closePt))
                                           sleepMs(600L)
                                           if (cfg.barnCap > 0) cfg.barnUsed = cfg.barnCap
@@ -1324,7 +1297,7 @@ jobs:
                       }
 
                       if (attempt < maxRetries) {
-                          onFail("Ожидание созревания / закрытие попапа ($attempt/$maxRetries)")
+                          onFail("Ожидание созревания ($attempt/$maxRetries)")
                           sleepMs(5500L)
                       }
                   }
@@ -1385,7 +1358,6 @@ jobs:
                               }
                           }
                           if (cropPt == null) {
-                              // Пшеница не найдена на текущем экране — закрываем окно выбора слота
                               tapSync(Geo.jitterTap(closePt)); sleepMs(450L); break@loop
                           }
                           tapSync(Geo.jitterTap(cropPt!!))
@@ -1630,7 +1602,7 @@ jobs:
           """)
           EOF
 
-            - name: Set up JDK 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
