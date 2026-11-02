@@ -1,0 +1,1654 @@
+name: Build HayBot APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Full Android Project
+        run: |
+          python3 - << 'EOF'
+          import os, textwrap
+
+          def write_file(path, content):
+              d = os.path.dirname(path)
+              if d:
+                  os.makedirs(d, exist_ok=True)
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(textwrap.dedent(content).strip() + "\n")
+
+          write_file("settings.gradle", """
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "HayBot"
+          include ':app'
+          """)
+
+          write_file("gradle.properties", """
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          """)
+
+          write_file("build.gradle", """
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
+          }
+          """)
+
+          write_file("app/build.gradle", """
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.example.haybot'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.example.haybot'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 2
+                  versionName '2.0-Pro'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = '17' }
+          }
+          """)
+
+          write_file("app/src/main/AndroidManifest.xml", """
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <queries>
+                  <package android:name="com.supercell.hayday" />
+              </queries>
+              <application
+                  android:allowBackup="false"
+                  android:label="@string/app_name">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:theme="@android:style/Theme.Material.NoActionBar">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".BotService"
+                      android:exported="false"
+                      android:label="@string/app_name"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          """)
+
+          write_file("app/src/main/res/xml/accessibility_config.xml", """
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canPerformGestures="true"
+              android:canTakeScreenshot="true"
+              android:description="@string/svc_desc"
+              android:notificationTimeout="100" />
+          """)
+
+          write_file("app/src/main/res/values/strings.xml", """
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">TapTapBot Pro</string>
+              <string name="svc_desc">Рисует панель поверх игры и автоматизирует посев, сбор и лавку Hay Day.</string>
+          </resources>
+          """)
+
+          write_file("app/src/main/java/com/example/haybot/Cfg.kt", """
+          package com.example.haybot
+
+          import android.content.Context
+          import android.content.SharedPreferences
+          import org.json.JSONArray
+          import org.json.JSONObject
+
+          data class P(val x: Float, val y: Float)
+          data class MTap(val p: P, val dtMs: Long)
+
+          enum class T(
+              val icon: String,
+              val label: String,
+              val multi: Boolean,
+              val min: Int,
+              val color: Int,
+              val perField: Boolean = false
+          ) {
+              FIELD("🌱", "Грядка", false, 1, 0xFF4CAF50.toInt(), true),
+              WHEAT("🌾", "Культура", false, 1, 0xFFFFC107.toInt(), true),
+              AREA("🧭", "Поле", true, 4, 0xFF29B6F6.toInt(), true),
+              HFIELD("🌿", "Грядка (сбор)", false, 1, 0xFF8BC34A.toInt(), true),
+              SICKLE("🔪", "Серп", false, 1, 0xFFEF5350.toInt(), true),
+              GROUND("🟫", "Пустая земля", false, 0, 0xFF8D6E63.toInt()),
+              SHOP("🏪", "Лавка", false, 0, 0xFFAB47BC.toInt()),
+              SLOT("🧺", "Слот", true, 1, 0xFFFF7043.toInt()),
+              SWIPE("↔", "Листание лавки", true, 0, 0xFF7E57C2.toInt()),
+              SLOT2("🧺²", "Слоты стр. 2", true, 0, 0xFFFF8A65.toInt()),
+              SLOT3("🧺³", "Слоты стр. 3", true, 0, 0xFFFFAB91.toInt()),
+              ITEM("📦", "Товар", false, 1, 0xFFFFCA28.toInt()),
+              ITEMS("🔎", "Ячейки списка", true, 0, 0xFFFFE082.toInt()),
+              EXTRA("➕", "Доп. кнопка", true, 0, 0xFF26A69A.toInt()),
+              AD("📢", "Реклама", false, 0, 0xFFEC407A.toInt()),
+              PUT("✅", "Выставить", false, 1, 0xFF66BB6A.toInt()),
+              CLOSE("❌", "Закрыть", false, 1, 0xFFE53935.toInt())
+          }
+
+          class Cfg(ctx: Context) {
+              companion object {
+                  const val MAXF = 4
+                  const val MAXM = 5
+              }
+
+              private val sp = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+              private val prof = ctx.getSharedPreferences("profiles", Context.MODE_PRIVATE)
+              private val pts = HashMap<String, MutableList<P>>()
+              var cur = 0
+              var onExternalChange: (() -> Unit)? = null
+
+              private val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+                  if (key == "rev") {
+                      reload()
+                      onExternalChange?.invoke()
+                  }
+              }
+
+              init {
+                  reload()
+                  sp.registerOnSharedPreferenceChangeListener(listener)
+              }
+
+              private fun key(t: T, f: Int) = if (t.perField && f > 0) t.name + "#" + f else t.name
+
+              fun reload() {
+                  pts.clear()
+                  for (f in 0 until MAXF) {
+                      for (t in T.values()) {
+                          if (f > 0 && !t.perField) continue
+                          val k = key(t, f)
+                          pts[k] = dec(sp.getString(k, null))
+                      }
+                  }
+              }
+
+              var sellEvery: Int
+                  get() = sp.getInt("every", 3)
+                  set(v) { sp.edit().putInt("every", v.coerceIn(1, 9)).apply() }
+
+              var rowGap: Int
+                  get() = sp.getInt("gap", 45)
+                  set(v) { sp.edit().putInt("gap", v.coerceIn(15, 150)).apply() }
+
+              var useRec: Boolean
+                  get() = sp.getBoolean("rec", true)
+                  set(v) { sp.edit().putBoolean("rec", v).apply() }
+
+              var holdMs: Int
+                  get() = sp.getInt("hold", 600)
+                  set(v) { sp.edit().putInt("hold", v.coerceIn(100, 2000)).apply() }
+
+              var plantMode: Int
+                  get() = sp.getInt("pmode", 3)
+                  set(v) { sp.edit().putInt("pmode", ((v % 4) + 4) % 4).apply() }
+
+              var shopPages: Int
+                  get() = sp.getInt("spages", 1).coerceIn(1, 6)
+                  set(v) { sp.edit().putInt("spages", v.coerceIn(1, 6)).apply() }
+
+              var swipeMs: Int
+                  get() = sp.getInt("swms", 700).coerceIn(400, 2000)
+                  set(v) { sp.edit().putInt("swms", v.coerceIn(400, 2000)).apply() }
+
+              var returnHand: Int
+                  get() = sp.getInt("rhand", 1)
+                  set(v) { sp.edit().putInt("rhand", if (v > 0) 1 else 0).apply() }
+
+              var edgePct: Int
+                  get() = sp.getInt("edge", 12)
+                  set(v) { sp.edit().putInt("edge", v.coerceIn(0, 25)).apply() }
+
+              var speedPlant: Int
+                  get() = sp.getInt("spp", 100)
+                  set(v) { sp.edit().putInt("spp", v.coerceIn(50, 200)).apply() }
+
+              var speedHarvest: Int
+                  get() = sp.getInt("sph", 100)
+                  set(v) { sp.edit().putInt("sph", v.coerceIn(50, 200)).apply() }
+
+              var speedShop: Int
+                  get() = sp.getInt("sps", 120)
+                  set(v) { sp.edit().putInt("sps", v.coerceIn(50, 300)).apply() }
+
+              fun setWheatPatch(a: IntArray) {
+                  sp.edit().putString("wpat", a.joinToString(",")).apply()
+              }
+
+              fun getWheatPatch(): IntArray? {
+                  val s = sp.getString("wpat", "") ?: ""
+                  if (s.isBlank()) return null
+                  return try { s.split(",").map { it.toInt() }.toIntArray() } catch (_: Exception) { null }
+              }
+
+              var groundMs: Int
+                  get() = sp.getInt("gms", 1600)
+                  set(v) { sp.edit().putInt("gms", v.coerceIn(600, 4000)).apply() }
+
+              var cells: Int
+                  get() = sp.getInt("cells", 60)
+                  set(v) { sp.edit().putInt("cells", v.coerceAtLeast(0)).apply() }
+
+              var perCell: Int
+                  get() = sp.getInt("pcell", 2)
+                  set(v) { sp.edit().putInt("pcell", v.coerceAtLeast(1)).apply() }
+
+              var barnCap: Int
+                  get() = sp.getInt("bcap", 300)
+                  set(v) { sp.edit().putInt("bcap", v.coerceAtLeast(0)).apply() }
+
+              var barnUsed: Int
+                  get() = sp.getInt("bused", 100)
+                  set(v) { sp.edit().putInt("bused", v.coerceAtLeast(0)).apply() }
+
+              var perSlot: Int
+                  get() = sp.getInt("pslot", 10)
+                  set(v) { sp.edit().putInt("pslot", v.coerceAtLeast(1)).apply() }
+
+              var fieldCount: Int
+                  get() = sp.getInt("fcount", 1).coerceIn(1, MAXF)
+                  set(v) { sp.edit().putInt("fcount", v.coerceIn(1, MAXF)).apply() }
+
+              fun grow(f: Int = cur): Int = sp.getInt(if (f > 0) "grow#$f" else "grow", 120)
+              fun setGrow(v: Int, f: Int = cur) {
+                  sp.edit().putInt(if (f > 0) "grow#$f" else "grow", v.coerceIn(20, 3600)).apply()
+              }
+
+              fun getRef(t: T, f: Int = cur): Int? {
+                  val k = "ref_" + key(t, f)
+                  return if (sp.contains(k)) sp.getInt(k, 0) else null
+              }
+
+              fun setRef(t: T, c: Int, f: Int = cur) {
+                  sp.edit().putInt("ref_" + key(t, f), c).apply()
+              }
+
+              private fun mlist(t: T, f: Int): MutableList<P> = pts.getOrPut(key(t, f)) { mutableListOf() }
+              fun list(t: T, f: Int = cur): List<P> = mlist(t, f)
+              fun first(t: T, f: Int = cur): P? = mlist(t, f).firstOrNull()
+
+              fun add(t: T, p: P) {
+                  val l = mlist(t, cur)
+                  if (!t.multi) l.clear()
+                  l.add(p)
+                  save()
+              }
+
+              fun clear(t: T) {
+                  mlist(t, cur).clear()
+                  save()
+                  sp.edit().remove("ref_" + key(t, cur)).apply()
+                  if (t == T.ITEM) sp.edit().remove("wpat").apply()
+              }
+
+              fun missingPair(): Pair<Int, T>? {
+                  for (f in 0 until fieldCount) {
+                      for (t in listOf(T.FIELD, T.WHEAT, T.AREA, T.HFIELD, T.SICKLE)) {
+                          if (list(t, f).size < t.min) return Pair(f, t)
+                      }
+                  }
+                  if (first(T.SHOP, 0) != null) {
+                      for (t in listOf(T.SLOT, T.ITEM, T.PUT, T.CLOSE)) {
+                          if (list(t, 0).size < t.min) return Pair(0, t)
+                      }
+                  }
+                  return null
+              }
+
+              fun exportJson(): String {
+                  val o = JSONObject()
+                  o.put("v", 2)
+                  o.put("every", sellEvery); o.put("gap", rowGap); o.put("rec", useRec)
+                  o.put("hold", holdMs); o.put("pmode", plantMode); o.put("fcount", fieldCount)
+                  o.put("spages", shopPages); o.put("rhand", returnHand); o.put("edge", edgePct)
+                  o.put("spp", speedPlant); o.put("sph", speedHarvest); o.put("sps", speedShop)
+                  o.put("wpat", sp.getString("wpat", "") ?: ""); o.put("swms", swipeMs)
+                  val g = JSONObject()
+                  for (f in 0 until MAXF) g.put("g$f", grow(f))
+                  o.put("grow", g)
+                  val p = JSONObject()
+                  for ((k, l) in pts) p.put(k, enc(l))
+                  o.put("pts", p)
+                  val r = JSONObject()
+                  for (f in 0 until MAXF) {
+                      for (t in T.values()) {
+                          if (f > 0 && !t.perField) continue
+                          val ref = getRef(t, f)
+                          if (ref != null) r.put(key(t, f), ref)
+                      }
+                  }
+                  o.put("ref", r)
+                  return o.toString()
+              }
+
+              fun importJson(s: String): Boolean {
+                  return try {
+                      val o = JSONObject(s.trim())
+                      val p = o.optJSONObject("pts") ?: return false
+                      val r = o.optJSONObject("ref")
+                      val e = sp.edit()
+                      e.putInt("every", o.optInt("every", 3).coerceIn(1, 9))
+                      e.putInt("gap", o.optInt("gap", 45).coerceIn(15, 150))
+                      e.putBoolean("rec", o.optBoolean("rec", true))
+                      e.putInt("hold", o.optInt("hold", 600).coerceIn(100, 2000))
+                      e.putInt("pmode", o.optInt("pmode", 3))
+                      e.putInt("fcount", o.optInt("fcount", 1).coerceIn(1, MAXF))
+                      e.putInt("spages", o.optInt("spages", 1).coerceIn(1, 6))
+                      e.putInt("rhand", o.optInt("rhand", 1))
+                      e.putInt("edge", o.optInt("edge", 12).coerceIn(0, 25))
+                      e.putInt("spp", o.optInt("spp", 100).coerceIn(50, 200))
+                      e.putInt("sph", o.optInt("sph", 100).coerceIn(50, 200))
+                      e.putInt("sps", o.optInt("sps", 120).coerceIn(50, 300))
+                      e.putString("wpat", o.optString("wpat", ""))
+                      e.putInt("swms", o.optInt("swms", 700).coerceIn(400, 2000))
+                      val g = o.optJSONObject("grow")
+                      for (f in 0 until MAXF) {
+                          val v = if (g != null) g.optInt("g$f", 120) else 120
+                          e.putInt(if (f > 0) "grow#$f" else "grow", v.coerceIn(20, 3600))
+                      }
+                      for (f in 0 until MAXF) {
+                          for (t in T.values()) {
+                              if (f > 0 && !t.perField) continue
+                              val k = key(t, f)
+                              e.putString(k, p.optString(k, ""))
+                              if (r != null && r.has(k)) e.putInt("ref_$k", r.getInt(k)) else e.remove("ref_$k")
+                          }
+                      }
+                      e.putInt("rev", sp.getInt("rev", 0) + 1)
+                      e.apply()
+                      reload()
+                      true
+                  } catch (_: Exception) { false }
+              }
+
+              private fun save() {
+                  val e = sp.edit()
+                  for ((k, l) in pts) e.putString(k, enc(l))
+                  e.apply()
+              }
+
+              private fun enc(l: List<P>) = l.joinToString(";") { "${it.x},${it.y}" }
+              private fun dec(s: String?): MutableList<P> {
+                  if (s.isNullOrBlank()) return mutableListOf()
+                  return s.split(";").mapNotNull {
+                      val a = it.split(",")
+                      if (a.size == 2) P(a[0].toFloat(), a[1].toFloat()) else null
+                  }.toMutableList()
+              }
+          }
+          """)
+
+          write_file("app/src/main/java/com/example/haybot/Flow.kt", """
+          package com.example.haybot
+
+          enum class Kind { TAP, MULTI, WAIT, DO, ASK, INFO, SWIPE, RECT }
+
+          class Stp(
+              val kind: Kind,
+              val role: T?,
+              val text: String,
+              val hint: String,
+              val replay: Boolean = false,
+              val fresh: Boolean = true,
+              val btn: String? = null,
+              val skip: String? = null,
+              val min: Int = 0,
+              val max: Int = 0,
+              val sample: Boolean = false,
+              val act: String? = null,
+              val settle: Long = 850
+          )
+
+          val FLOW: List<Stp> = listOf(
+              Stp(Kind.INFO, null, "Поставь камеру руками", "Отдали карту и поставь ПОЛЕ БЛИЖЕ К ЦЕНТРУ экрана, подальше от краёв. Должны быть видны поле, лавка и пустая земля.", btn = "Камера готова ▶"),
+              Stp(Kind.TAP, T.FIELD, "Нажми на стартовую грядку", "Я повторю нажатие: откроется меню посева.", replay = true, settle = 1600),
+              Stp(Kind.TAP, T.WHEAT, "Нажми на культуру в меню (пшеница)", "Только запомню координаты иконки."),
+              Stp(Kind.RECT, T.AREA, "Растяни рамку по полю", "Тяни за 4 угла, чтобы накрыть поле ромбом. Линии покажут маршрут пальца.", btn = "Готово ✓"),
+              Stp(Kind.TAP, T.GROUND, "Нажми на пустую землю рядом с полем", "После посева бот зажмёт эту точку, чтобы мгновенно остановить уход камеры.", skip = "Не нужно"),
+              Stp(Kind.DO, null, "Проверка посева", "Бот засеет поле, вернет палец в старт и зажмет землю.", btn = "🌱 Посадить", act = "plant"),
+              Stp(Kind.WAIT, null, "Пшеница растёт ⏳", "Дождись созревания пшеницы и жми дальше.", btn = "Выросла — дальше ▶"),
+              Stp(Kind.TAP, T.HFIELD, "Нажми на спелую грядку", "Запомню цвет спелой пшеницы и вызову серп.", replay = true, sample = true),
+              Stp(Kind.TAP, T.SICKLE, "Нажми на серп", "Запомню положение и цвет серпа.", sample = true),
+              Stp(Kind.DO, null, "Проверка сбора", "Бот соберет урожай по той же змейке.", btn = "🔪 Собрать", act = "harvest"),
+              Stp(Kind.ASK, null, "Настроить продажу в лавке?", "Бот будет выкладывать пшеницу в слоты и давать рекламу на последнем слоте.", btn = "Да, настроить ▶", skip = "Без продажи"),
+              Stp(Kind.TAP, T.SHOP, "Нажми на лавку", "Откроется придорожный магазин.", replay = true),
+              Stp(Kind.TAP, T.SLOT, "Нажми на 1-й слот лавки", "Предыдущие слоты очистятся, запишется 1-й слот и соберется выручка.", replay = true, fresh = true),
+              Stp(Kind.TAP, null, "Нажми на этот же слот ещё раз", "Откроется меню силосной башни.", replay = true, skip = "Уже открылось"),
+              Stp(Kind.MULTI, T.ITEMS, "Отметь 4–6 ячеек списка культур", "Если другой культуры станет больше, пшеница сместится — бот найдет её по колосьям среди этих ячеек.", btn = "Готово ✓", skip = "Одно место", max = 8),
+              Stp(Kind.TAP, T.ITEM, "Нажми на пшеницу в списке", "Сфотографирую верхнюю часть иконки (без цифр количества) для точного распознавания.", replay = true, sample = true),
+              Stp(Kind.MULTI, T.EXTRA, "Нажми макс. цену / количество", "Эти клики повторятся при каждой выкладке.", replay = true, btn = "Дальше ▶"),
+              Stp(Kind.TAP, T.AD, "Укажи кнопку галочки рекламы", "Реклама будет ставиться на последнем слоте не чаще раза в 5 минут.", skip = "Без рекламы"),
+              Stp(Kind.TAP, T.PUT, "Укажи кнопку «Выставить»", "Запомню цвет кнопки для проверки открытия лота.", sample = true),
+              Stp(Kind.INFO, null, "Закрой окно выбора товара", "Вернись к списку слотов лавки.", btn = "Окно закрыто ▶"),
+              Stp(Kind.MULTI, T.SLOT, "Отметь остальные слоты на 1-м экране", "Нажимай со 2-го слота по порядку (1-й уже сохранен).", fresh = false, btn = "Готово ✓"),
+              Stp(Kind.SWIPE, T.SWIPE, "Пролистай лавку влево", "Проведи пальцем для прокрутки слотов.", skip = "Один экран"),
+              Stp(Kind.MULTI, T.SLOT2, "Отметь слоты на странице 2", "Или нажми «Те же места».", btn = "Готово ✓", skip = "Те же места"),
+              Stp(Kind.DO, null, "Есть 3-я страница?", "Пролистаю ещё раз для 3-й страницы.", btn = "↔ Листать дальше", skip = "Это последняя", act = "swipe2"),
+              Stp(Kind.MULTI, T.SLOT3, "Отметь слоты на странице 3", "Или жми «Те же места».", btn = "Готово ✓", skip = "Те же места"),
+              Stp(Kind.TAP, T.CLOSE, "Нажми на крестик закрытия лавки", "Запомню вид крестика и закрою магазин.", replay = true, sample = true)
+          )
+          """)
+
+          write_file("app/src/main/java/com/example/haybot/Geo.kt", """
+          package com.example.haybot
+
+          import java.util.Random
+          import kotlin.math.atan2
+          import kotlin.math.hypot
+          import kotlin.math.max
+          import kotlin.math.roundToInt
+
+          object Geo {
+              private val rng = Random()
+
+              fun order(pts: List<P>): List<P> {
+                  if (pts.size < 3) return pts
+                  val cx = pts.map { it.x }.average().toFloat()
+                  val cy = pts.map { it.y }.average().toFloat()
+                  val sorted = pts.sortedBy { atan2((it.y - cy).toDouble(), (it.x - cx).toDouble()) }
+                  val tlIdx = sorted.indices.minByOrNull { sorted[it].x + sorted[it].y } ?: 0
+                  return List(sorted.size) { i -> sorted[(tlIdx + i) % sorted.size] }
+              }
+
+              private fun bilerp(q0: P, q1: P, q2: P, q3: P, u: Float, v: Float): P {
+                  val tx = q0.x + (q1.x - q0.x) * u
+                  val ty = q0.y + (q1.y - q0.y) * u
+                  val bx = q3.x + (q2.x - q3.x) * u
+                  val by = q3.y + (q2.y - q3.y) * u
+                  return P(tx + (bx - tx) * v, ty + (by - ty) * v)
+              }
+
+              fun zigzag(pts: List<P>, gap: Float, w: Int = 0, h: Int = 0, edge: Int = 0): List<P> {
+                  if (pts.size < 4) return pts
+                  val q = order(pts)
+                  return buildSnake(q[0], q[1], q[2], q[3], gap, w, h, edge)
+              }
+
+              fun zigzagFrom(pts: List<P>, gap: Float, near: P, w: Int = 0, h: Int = 0, edge: Int = 0): List<P> {
+                  if (pts.size < 4) return pts
+                  val q = order(pts)
+                  val sc = q.indices.minByOrNull { hypot(q[it].x - near.x, q[it].y - near.y) } ?: 0
+                  val snake = buildSnake(q[sc], q[(sc + 1) % 4], q[(sc + 2) % 4], q[(sc + 3) % 4], gap, w, h, edge).toMutableList()
+                  val cNear = clamp(near, w, h, edge)
+                  if (snake.isEmpty() || hypot(snake.first().x - cNear.x, snake.first().y - cNear.y) > 12f) {
+                      snake.add(0, cNear)
+                  }
+                  return snake
+              }
+
+              private fun buildSnake(q0: P, q1: P, q2: P, q3: P, gap: Float, w: Int, h: Int, edge: Int): List<P> {
+                  val sideA = max(hypot(q1.x - q0.x, q1.y - q0.y), hypot(q2.x - q3.x, q2.y - q3.y))
+                  val sideB = max(hypot(q3.x - q0.x, q3.y - q0.y), hypot(q2.x - q1.x, q2.y - q1.y))
+                  val sGap = gap.coerceAtLeast(15f)
+                  val rows = max(2, (sideB / sGap).roundToInt() + 1)
+                  val cols = max(3, (sideA / (sGap * 0.85f)).roundToInt() + 1)
+                  val out = ArrayList<P>(rows * cols)
+                  for (r in 0 until rows) {
+                      val v = if (rows == 1) 0.5f else r.toFloat() / (rows - 1).toFloat()
+                      for (c in 0 until cols) {
+                          val ru = if (cols == 1) 0.5f else c.toFloat() / (cols - 1).toFloat()
+                          val u = if (r % 2 == 0) ru else (1f - ru)
+                          out.add(clamp(bilerp(q0, q1, q2, q3, u, v), w, h, edge))
+                      }
+                  }
+                  return out
+              }
+
+              fun clamp(p: P, w: Int, h: Int, edge: Int): P {
+                  if (w <= 0 || h <= 0 || edge <= 0) return p
+                  val pct = edge.coerceIn(0, 25) / 100f
+                  return P(p.x.coerceIn(w * pct, w * (1f - pct)), p.y.coerceIn(h * pct, h * (1f - pct)))
+              }
+
+              fun applyPlantMode(pts: List<P>, mode: Int, w: Int, h: Int, edge: Int): List<P> {
+                  if (pts.size < 2) return pts
+                  return when (mode) {
+                      1 -> {
+                          // Режим 1: Медленно (больше промежуточных точек)
+                          val res = ArrayList<P>(pts.size * 2)
+                          for (i in 0 until pts.size - 1) {
+                              val a = pts[i]; val b = pts[i + 1]
+                              res.add(a)
+                              res.add(P((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f))
+                          }
+                          res.add(pts.last())
+                          res
+                      }
+                      2 -> {
+                          // Режим 2: По шагам
+                          pts.filterIndexed { idx, _ -> idx == 0 || idx == pts.size - 1 || idx % 2 == 0 }
+                      }
+                      3 -> {
+                          // Режим 3: Как человек (плавающая кривая + гауссов тремор пальца)
+                          val res = ArrayList<P>(pts.size * 2)
+                          for (i in pts.indices) {
+                              val cur = pts[i]
+                              val jx = cur.x + (rng.nextGaussian().toFloat() * 2.5f).coerceIn(-5.5f, 5.5f)
+                              val jy = cur.y + (rng.nextGaussian().toFloat() * 2.5f).coerceIn(-5.5f, 5.5f)
+                              res.add(clamp(P(jx, jy), w, h, edge))
+                              if (i < pts.size - 1) {
+                                  val nxt = pts[i + 1]
+                                  if (hypot(nxt.x - cur.x, nxt.y - cur.y) > 85f) {
+                                      val mx = (cur.x + nxt.x) * 0.5f + (rng.nextFloat() - 0.5f) * 7f
+                                      val my = (cur.y + nxt.y) * 0.5f + (rng.nextFloat() - 0.5f) * 7f
+                                      res.add(clamp(P(mx, my), w, h, edge))
+                                  }
+                              }
+                          }
+                          res
+                      }
+                      else -> pts
+                  }
+              }
+
+              fun jitterTap(p: P): P {
+                  val dx = (rng.nextGaussian().toFloat() * 3.2f).coerceIn(-6f, 6f)
+                  val dy = (rng.nextGaussian().toFloat() * 3.2f).coerceIn(-6f, 6f)
+                  return P(p.x + dx, p.y + dy)
+              }
+
+              fun jitterDelay(ms: Long, speedPct: Int = 100): Long {
+                  val scaled = (ms * 100L) / speedPct.coerceIn(50, 300)
+                  val d = ((rng.nextFloat() * 2f - 1f) * 0.14f * scaled).toLong()
+                  return (scaled + d).coerceAtLeast(30L)
+              }
+          }
+          """)
+
+          write_file("app/src/main/java/com/example/haybot/Vision.kt", """
+          package com.example.haybot
+
+          import android.graphics.Bitmap
+          import android.graphics.Color
+          import kotlin.math.abs
+          import kotlin.math.roundToInt
+          import kotlin.math.sqrt
+
+          object Vision {
+              // Берем область 20x16 в ВЕРХНЕЙ части иконки (смещение вверх от цифр количества),
+              // чтобы цифры запаса (например, 10 vs 240) и бежевый фон слота не портили распознавание!
+              private const val PW = 20
+              private const val PH = 16
+              private const val EXPECTED_LEN = PW * PH
+
+              fun sampleColor(bmp: Bitmap, p: P): Int {
+                  val cx = p.x.roundToInt().coerceIn(0, bmp.width - 1)
+                  val cy = p.y.roundToInt().coerceIn(0, bmp.height - 1)
+                  var r = 0; var g = 0; var b = 0; var cnt = 0
+                  for (dy in -2..2) {
+                      val y = (cy + dy).coerceIn(0, bmp.height - 1)
+                      for (dx in -2..2) {
+                          val x = (cx + dx).coerceIn(0, bmp.width - 1)
+                          val c = bmp.getPixel(x, y)
+                          r += Color.red(c); g += Color.green(c); b += Color.blue(c); cnt++
+                      }
+                  }
+                  return Color.rgb(r / cnt, g / cnt, b / cnt)
+              }
+
+              fun matchesColor(bmp: Bitmap, p: P, ref: Int, maxDist: Double = 52.0): Boolean {
+                  val cx = p.x.roundToInt()
+                  val cy = p.y.roundToInt()
+                  var best = Double.MAX_VALUE
+                  for (dy in -3..3 step 3) {
+                      for (dx in -3..3 step 3) {
+                          val c = sampleColor(bmp, P((cx + dx).toFloat(), (cy + dy).toFloat()))
+                          val dr = (Color.red(c) - Color.red(ref)).toDouble()
+                          val dg = (Color.green(c) - Color.green(ref)).toDouble()
+                          val db = (Color.blue(c) - Color.blue(ref)).toDouble()
+                          val d = sqrt(dr * dr + dg * dg + db * db)
+                          if (d < best) best = d
+                      }
+                  }
+                  return best <= maxDist
+              }
+
+              /**
+               * Извлекает патч 20x16 из верхней части иконки (dy от -14 до +2),
+               * игнорируя нижнюю строчку с цифрами количества товара.
+               */
+              fun extractCropIconPatch(bmp: Bitmap, center: P): IntArray {
+                  val cx = center.x.roundToInt()
+                  val cy = center.y.roundToInt()
+                  val out = IntArray(EXPECTED_LEN)
+                  var i = 0
+                  for (dy in -14 until 2) {
+                      val y = (cy + dy).coerceIn(0, bmp.height - 1)
+                      for (dx in -10 until 10) {
+                          val x = (cx + dx).coerceIn(0, bmp.width - 1)
+                          out[i++] = bmp.getPixel(x, y) and 0xFFFFFF
+                      }
+                  }
+                  return out
+              }
+
+              /**
+               * Комбинированное сравнение иконки культуры с маскированием фона меню силоса
+               * и весом по цветовым каналам + хроматичности (R-B, G-B).
+               */
+              fun findBestCropCell(bmp: Bitmap, candidates: List<P>, refPatch: IntArray?, threshold: Double = 82.0): P? {
+                  if (candidates.isEmpty()) return null
+                  if (refPatch == null || refPatch.size != EXPECTED_LEN) return candidates.first()
+
+                  var bestP: P? = null
+                  var bestScore = 0.0
+
+                  for (pt in candidates) {
+                      val bx = pt.x.roundToInt()
+                      val by = pt.y.roundToInt()
+                      var bestLocalScore = 0.0
+
+                      for (oy in -6..6 step 2) {
+                          for (ox in -6..6 step 2) {
+                              var weightedErr = 0.0
+                              var weightSum = 0.0
+                              var idx = 0
+                              for (dy in -14 until 2) {
+                                  val y = (by + oy + dy).coerceIn(0, bmp.height - 1)
+                                  for (dx in -10 until 10) {
+                                      val x = (bx + ox + dx).coerceIn(0, bmp.width - 1)
+                                      val px = bmp.getPixel(x, y)
+                                      val rf = refPatch[idx++]
+
+                                      val r1 = Color.red(px); val g1 = Color.green(px); val b1 = Color.blue(px)
+                                      val r2 = (rf shr 16) and 0xFF; val g2 = (rf shr 8) and 0xFF; val b2 = rf and 0xFF
+
+                                      // Пиксели с высокой насыщенностью (сама культура, а не серый/бежевый фон) получают тройной вес
+                                      val sat2 = maxOf(r2, g2, b2) - minOf(r2, g2, b2)
+                                      val w = if (sat2 > 38) 3.0 else 0.7
+
+                                      val rgbDiff = (abs(r1 - r2) + abs(g1 - g2) + abs(b1 - b2)) / 3.0
+                                      // Хроматическая разница (отличает желтую пшеницу от кукурузы/моркови/сои)
+                                      val chromaDiff = (abs((r1 - b1) - (r2 - b2)) + abs((g1 - b1) - (g2 - b2))) * 0.65
+
+                                      weightedErr += (rgbDiff + chromaDiff) * w
+                                      weightSum += 255.0 * w
+                                  }
+                              }
+                              val sim = (1.0 - (weightedErr / weightSum).coerceIn(0.0, 1.0)) * 100.0
+                              if (sim > bestLocalScore) bestLocalScore = sim
+                          }
+                      }
+                      if (bestLocalScore > bestScore) {
+                          bestScore = bestLocalScore
+                          bestP = pt
+                      }
+                  }
+                  return if (bestScore >= threshold) bestP else null
+              }
+          }
+          """)
+
+          write_file("app/src/main/java/com/example/haybot/MarkView.kt", """
+          package com.example.haybot
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.Path
+          import android.view.MotionEvent
+          import android.view.View
+          import kotlin.math.hypot
+
+          class MarkView(ctx: Context, private val cfg: Cfg) : View(ctx) {
+              var armed = false
+              var showAll = false
+              var onTap: ((Float, Float) -> Unit)? = null
+              var swipeMode = false
+              var onSwipe: ((P, P, Long) -> Unit)? = null
+              private var downT = 0L
+              var editMode = false
+              var editPts: MutableList<P>? = null
+              private var dragIdx = -1
+              private var lastX = 0f
+              private var lastY = 0f
+              private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val poly = Path()
+              private val loc = IntArray(2)
+              private var down = false
+              private var dx = 0f
+              private var dy = 0f
+
+              private fun inside(pts: List<P>, x: Float, y: Float): Boolean {
+                  val q = Geo.order(pts)
+                  var res = false
+                  var j = q.size - 1
+                  for (i in q.indices) {
+                      if ((q[i].y > y) != (q[j].y > y) &&
+                          x < (q[j].x - q[i].x) * (y - q[i].y) / (q[j].y - q[i].y) + q[i].x
+                      ) res = !res
+                      j = i
+                  }
+                  return res
+              }
+
+              private fun handleEdit(e: MotionEvent, pts: MutableList<P>): Boolean {
+                  when (e.actionMasked) {
+                      MotionEvent.ACTION_DOWN -> {
+                          lastX = e.rawX; lastY = e.rawY; dragIdx = -1
+                          var best = 110f
+                          for (i in pts.indices) {
+                              val d = hypot(pts[i].x - e.rawX, pts[i].y - e.rawY)
+                              if (d < best) { best = d; dragIdx = i }
+                          }
+                          if (dragIdx == -1 && inside(pts, e.rawX, e.rawY)) dragIdx = -2
+                      }
+                      MotionEvent.ACTION_MOVE -> {
+                          val ddx = e.rawX - lastX; val ddy = e.rawY - lastY
+                          if (dragIdx >= 0) pts[dragIdx] = P(e.rawX, e.rawY)
+                          else if (dragIdx == -2) for (i in pts.indices) pts[i] = P(pts[i].x + ddx, pts[i].y + ddy)
+                          lastX = e.rawX; lastY = e.rawY; invalidate()
+                      }
+                      MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> dragIdx = -1
+                  }
+                  return true
+              }
+
+              override fun onTouchEvent(e: MotionEvent): Boolean {
+                  if (!armed) return false
+                  val ep = editPts
+                  if (editMode && ep != null) return handleEdit(e, ep)
+                  when (e.actionMasked) {
+                      MotionEvent.ACTION_DOWN -> { down = true; dx = e.rawX; dy = e.rawY; downT = System.currentTimeMillis() }
+                      MotionEvent.ACTION_UP -> {
+                          if (down) {
+                              down = false
+                              val ux = e.rawX; val uy = e.rawY
+                              if (swipeMode && hypot(ux - dx, uy - dy) >= 80f) onSwipe?.invoke(P(dx, dy), P(ux, uy), System.currentTimeMillis() - downT)
+                              else onTap?.invoke(dx, dy)
+                          }
+                      }
+                      MotionEvent.ACTION_CANCEL -> down = false
+                  }
+                  return true
+              }
+
+              override fun onDraw(c: Canvas) {
+                  if (!armed && !showAll) return
+                  getLocationOnScreen(loc)
+                  val ox = loc[0].toFloat(); val oy = loc[1].toFloat()
+                  if (armed) c.drawColor(0x30FFEB3B)
+                  val area: List<P> = editPts ?: cfg.list(T.AREA)
+                  if (area.size >= 3) {
+                      val q = Geo.order(area)
+                      poly.reset()
+                      poly.moveTo(q[0].x - ox, q[0].y - oy)
+                      for (i in 1 until q.size) poly.lineTo(q[i].x - ox, q[i].y - oy)
+                      poly.close()
+                      p.style = Paint.Style.FILL; p.color = 0x3329B6F6; c.drawPath(poly, p)
+                      p.style = Paint.Style.STROKE; p.strokeWidth = 4f; p.color = T.AREA.color; c.drawPath(poly, p)
+                  }
+                  if (area.size >= 4) {
+                      val f = cfg.first(T.FIELD)
+                      val z = if (f != null) Geo.zigzagFrom(area, cfg.rowGap.toFloat(), f, width, height, cfg.edgePct)
+                              else Geo.zigzag(area, cfg.rowGap.toFloat(), width, height, cfg.edgePct)
+                      p.style = Paint.Style.STROKE; p.strokeWidth = 3f; p.color = 0xCCFFFFFF.toInt()
+                      for (i in 1 until z.size) c.drawLine(z[i - 1].x - ox, z[i - 1].y - oy, z[i].x - ox, z[i].y - oy, p)
+                  }
+                  if (editMode) {
+                      for (q in area) {
+                          p.style = Paint.Style.FILL; p.color = Color.WHITE; c.drawCircle(q.x - ox, q.y - oy, 34f, p)
+                          p.color = T.AREA.color; c.drawCircle(q.x - ox, q.y - oy, 24f, p)
+                      }
+                  }
+                  p.style = Paint.Style.FILL
+                  for (t in T.values()) {
+                      for ((i, pt) in cfg.list(t).withIndex()) {
+                          p.color = t.color; c.drawCircle(pt.x - ox, pt.y - oy, 20f, p)
+                          p.color = Color.WHITE; p.textSize = 30f
+                          val label = t.icon + (if (t.multi) (i + 1).toString() else "")
+                          c.drawText(label, pt.x - ox + 24f, pt.y - oy + 10f, p)
+                      }
+                  }
+              }
+          }
+          """)
+
+          write_file("app/src/main/java/com/example/haybot/BotService.kt", """
+          package com.example.haybot
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.app.AlertDialog
+          import android.graphics.Bitmap
+          import android.graphics.Color
+          import android.graphics.Path
+          import android.graphics.PixelFormat
+          import android.os.Build
+          import android.os.Handler
+          import android.os.Looper
+          import android.text.InputType
+          import android.view.Display
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import java.util.Random
+          import java.util.concurrent.CountDownLatch
+          import java.util.concurrent.TimeUnit
+          import kotlin.concurrent.thread
+          import kotlin.math.hypot
+          import kotlin.math.max
+          import kotlin.math.min
+
+          class BotService : AccessibilityService() {
+              companion object {
+                  @Volatile var instance: BotService? = null
+                  private const val HAYDAY_PKG = "com.supercell.hayday"
+                  private const val AD_COOLDOWN_MS = 300_000L
+                  private const val SILO_MARGIN = 8
+              }
+
+              private lateinit var wm: WindowManager
+              private lateinit var cfg: Cfg
+              private lateinit var markView: MarkView
+              private lateinit var markParams: WindowManager.LayoutParams
+              private lateinit var panel: LinearLayout
+              private lateinit var panelParams: WindowManager.LayoutParams
+              private lateinit var tvStatus: TextView
+              private lateinit var tvHint: TextView
+              private lateinit var btnPrimary: Button
+              private lateinit var btnSecondary: Button
+              private lateinit var btnBack: Button
+              private lateinit var btnFieldSel: Button
+              private val mainHandler = Handler(Looper.getMainLooper())
+              private val rng = Random()
+
+              @Volatile private var running = false
+              @Volatile private var gameInForeground = true
+              private var worker: Thread? = null
+              private var stepIdx = 0
+              private var lastAdMs = 0L
+              private var watchdogFails = 0
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  instance = this
+                  cfg = Cfg(this)
+                  cfg.onExternalChange = { mainHandler.post { showIdleUi(); markView.invalidate() } }
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  initOverlay()
+                  showIdleUi()
+              }
+
+              /**
+               * Контроль переднего плана: если пользователь свернул Hay Day или открылось чужое приложение,
+               * бот ставит действия на паузу и не кликает по рабочему столу/мессенджерам.
+               */
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+                  if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                      val pkg = event.packageName?.toString() ?: return
+                      if (pkg == packageName || pkg == "android" || pkg.startsWith("com.android.systemui")) return
+                      gameInForeground = (pkg == HAYDAY_PKG)
+                  }
+              }
+
+              override fun onInterrupt() { stopBot() }
+              override fun onDestroy() {
+                  stopBot()
+                  runCatching { wm.removeView(markView) }
+                  runCatching { wm.removeView(panel) }
+                  instance = null
+                  super.onDestroy()
+              }
+
+              private fun overlayType() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                  WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+              else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+
+              private fun initOverlay() {
+                  markView = MarkView(this, cfg)
+                  markParams = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+                      overlayType(),
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  wm.addView(markView, markParams)
+
+                  panel = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(0xDD1E1E24.toInt())
+                      setPadding(24, 16, 24, 16)
+                  }
+                  val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                  val dragTv = TextView(this).apply { text = "≡ HayBot "; setTextColor(Color.parseColor("#FFCA28")); textSize = 14f }
+                  tvStatus = TextView(this).apply { text = "Готов"; setTextColor(Color.WHITE); textSize = 12f; layoutParams = LinearLayout.LayoutParams(0, -2, 1f) }
+
+                  btnFieldSel = Button(this).apply {
+                      text = "П1"
+                      textSize = 11f
+                      setOnClickListener {
+                          cfg.cur = (cfg.cur + 1) % cfg.fieldCount
+                          text = "П${cfg.cur + 1}"
+                          markView.invalidate()
+                          showIdleUi()
+                      }
+                  }
+
+                  val btnEye = Button(this).apply {
+                      text = "👁"; textSize = 11f
+                      setOnClickListener { markView.showAll = !markView.showAll; markView.invalidate() }
+                  }
+                  header.addView(dragTv); header.addView(tvStatus); header.addView(btnFieldSel); header.addView(btnEye)
+
+                  tvHint = TextView(this).apply { setTextColor(0xFFCCCCCC.toInt()); textSize = 11f; setPadding(0, 6, 0, 8) }
+                  val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  btnBack = Button(this).apply { text = "↩"; visibility = View.GONE; setOnClickListener { if (stepIdx > 0) { stepIdx--; renderStep() } else showIdleUi() } }
+                  btnPrimary = Button(this).apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) }
+                  btnSecondary = Button(this).apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) }
+                  row.addView(btnBack); row.addView(btnPrimary); row.addView(btnSecondary)
+
+                  panel.addView(header); panel.addView(tvHint); panel.addView(row)
+                  panelParams = WindowManager.LayoutParams(
+                      -2, -2, overlayType(),
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                          WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+                      PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.START; x = 30; y = 100
+                  }
+                  var ix = 0; var iy = 0; var tx = 0f; var ty = 0f
+                  header.setOnTouchListener { _, e ->
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> { ix = panelParams.x; iy = panelParams.y; tx = e.rawX; ty = e.rawY; true }
+                          MotionEvent.ACTION_MOVE -> { panelParams.x = ix + (e.rawX - tx).toInt(); panelParams.y = iy + (e.rawY - ty).toInt(); wm.updateViewLayout(panel, panelParams); true }
+                          else -> false
+                      }
+                  }
+                  wm.addView(panel, panelParams)
+              }
+
+              private fun armMark(armed: Boolean, rect: Boolean = false, swipe: Boolean = false) {
+                  mainHandler.post {
+                      markView.armed = armed; markView.editMode = rect; markView.swipeMode = swipe
+                      markParams.flags = if (armed) WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                      else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                      runCatching { wm.updateViewLayout(markView, markParams) }
+                      markView.invalidate()
+                  }
+              }
+
+              private fun showIdleUi() {
+                  mainHandler.post {
+                      armMark(false)
+                      btnFieldSel.text = "П${cfg.cur + 1}/${cfg.fieldCount}"
+                      val miss = cfg.missingPair()
+                      tvStatus.text = if (running) "🟢 Работает | Силос: ${cfg.barnUsed}/${cfg.barnCap}" else "⚪ Готов | Силос: ${cfg.barnUsed}/${cfg.barnCap}"
+                      tvHint.text = if (miss != null) "Не настроено: Поле ${miss.first + 1} -> ${miss.second.icon} ${miss.second.label}" else "Все точки готовы. Нажми Старт."
+                      btnBack.visibility = View.GONE
+                      btnPrimary.text = if (running) "⏹ Стоп" else "▶ Старт"
+                      btnPrimary.setOnClickListener { if (running) stopBot() else askSiloAndStart() }
+                      btnSecondary.visibility = View.VISIBLE
+                      btnSecondary.text = "⚙ Мастер"
+                      btnSecondary.setOnClickListener { if (!running) { stepIdx = 0; renderStep() } }
+                  }
+              }
+
+              private fun askSiloAndStart() {
+                  val miss = cfg.missingPair()
+                  if (miss != null) { cfg.cur = miss.first; stepIdx = 0; renderStep(); return }
+                  val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 20, 40, 10) }
+                  fun field(lbl: String, v: Int): EditText {
+                      box.addView(TextView(this).apply { text = lbl })
+                      return EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(v.toString()); box.addView(this) }
+                  }
+                  val eCells = field("Количество грядок на поле (cells):", cfg.cells)
+                  val eUsed = field("Сейчас занято в силосной башне:", cfg.barnUsed)
+                  val eCap = field("Лимит силосной башни (макс.):", cfg.barnCap)
+                  val dlg = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                      .setTitle("Контроль силосной башни (х2 сбор)")
+                      .setView(box)
+                      .setPositiveButton("Старт") { _, _ ->
+                          cfg.cells = eCells.text.toString().toIntOrNull() ?: cfg.cells
+                          cfg.barnUsed = eUsed.text.toString().toIntOrNull() ?: cfg.barnUsed
+                          cfg.barnCap = eCap.text.toString().toIntOrNull() ?: cfg.barnCap
+                          startLoop()
+                      }
+                      .setNegativeButton("Отмена", null).create()
+                  dlg.window?.setType(overlayType())
+                  dlg.show()
+              }
+
+              private fun nextStep() { if (stepIdx + 1 < FLOW.size) { stepIdx++; renderStep() } else showIdleUi() }
+
+              private fun renderStep() {
+                  val s = FLOW[stepIdx]
+                  tvStatus.text = "П${cfg.cur + 1} Шаг ${stepIdx + 1}/${FLOW.size}: ${s.text}"
+                  tvHint.text = s.hint
+                  btnBack.visibility = View.VISIBLE
+                  markView.onTap = null; markView.onSwipe = null
+                  when (s.kind) {
+                      Kind.INFO, Kind.WAIT -> {
+                          armMark(false)
+                          btnPrimary.text = s.btn ?: "Дальше ▶"; btnPrimary.setOnClickListener { nextStep() }
+                          btnSecondary.visibility = View.GONE
+                      }
+                      Kind.ASK -> {
+                          armMark(false)
+                          btnPrimary.text = s.btn ?: "Да ▶"; btnPrimary.setOnClickListener { nextStep() }
+                          btnSecondary.visibility = View.VISIBLE; btnSecondary.text = s.skip ?: "Пропустить"; btnSecondary.setOnClickListener { showIdleUi() }
+                      }
+                      Kind.RECT -> {
+                          val area = cfg.list(T.AREA).toMutableList()
+                          if (area.size < 4) {
+                              val dm = resources.displayMetrics; val cx = dm.widthPixels / 2f; val cy = dm.heightPixels / 2f
+                              area.clear(); area.add(P(cx - 220f, cy)); area.add(P(cx, cy - 130f)); area.add(P(cx + 220f, cy)); area.add(P(cx, cy + 130f))
+                          }
+                          markView.editPts = area
+                          armMark(true, rect = true)
+                          btnPrimary.text = s.btn ?: "Готово ✓"
+                          btnPrimary.setOnClickListener { cfg.clear(T.AREA); area.forEach { cfg.add(T.AREA, it) }; markView.editPts = null; nextStep() }
+                          btnSecondary.visibility = View.GONE
+                      }
+                      Kind.TAP -> {
+                          // Исправлен баг дублирования 1-го слота при повторной калибровке
+                          if (s.fresh && s.role != null && s.role.multi) cfg.clear(s.role)
+                          armMark(true)
+                          btnPrimary.text = "Жду тапа..."; btnPrimary.setOnClickListener(null)
+                          if (s.skip != null) { btnSecondary.visibility = View.VISIBLE; btnSecondary.text = s.skip; btnSecondary.setOnClickListener { nextStep() } }
+                          else btnSecondary.visibility = View.GONE
+                          markView.onTap = { x, y ->
+                              val pt = P(x, y)
+                              if (s.role != null) cfg.add(s.role, pt)
+                              armMark(false)
+                              thread {
+                                  if (s.sample && s.role != null) {
+                                      Thread.sleep(150)
+                                      takeScreen()?.let { bmp ->
+                                          cfg.setRef(s.role, Vision.sampleColor(bmp, pt))
+                                          if (s.role == T.ITEM) cfg.setWheatPatch(Vision.extractCropIconPatch(bmp, pt))
+                                          bmp.recycle()
+                                      }
+                                  }
+                                  if (s.replay) { Thread.sleep(120); tapSync(pt); Thread.sleep(s.settle) }
+                                  mainHandler.post { nextStep() }
+                              }
+                          }
+                      }
+                      Kind.MULTI -> {
+                          if (s.fresh && s.role != null) cfg.clear(s.role)
+                          armMark(true)
+                          btnPrimary.text = s.btn ?: "Готово ✓"; btnPrimary.setOnClickListener { nextStep() }
+                          if (s.skip != null) { btnSecondary.visibility = View.VISIBLE; btnSecondary.text = s.skip; btnSecondary.setOnClickListener { nextStep() } }
+                          else btnSecondary.visibility = View.GONE
+                          markView.onTap = { x, y ->
+                              val pt = P(x, y)
+                              if (s.role != null && (s.max == 0 || cfg.list(s.role).size < s.max)) cfg.add(s.role, pt)
+                              markView.invalidate()
+                              if (s.replay) {
+                                  armMark(false)
+                                  thread { Thread.sleep(100); tapSync(pt); Thread.sleep(450); mainHandler.post { armMark(true) } }
+                              }
+                          }
+                      }
+                      Kind.SWIPE -> {
+                          armMark(true, swipe = true)
+                          btnPrimary.text = "Свайпни..."
+                          if (s.skip != null) { btnSecondary.visibility = View.VISIBLE; btnSecondary.text = s.skip; btnSecondary.setOnClickListener { cfg.shopPages = 1; showIdleUi() } }
+                          markView.onSwipe = { p1, p2, dur ->
+                              if (s.role != null) { cfg.clear(s.role); cfg.add(s.role, p1); cfg.add(s.role, p2) }
+                              cfg.swipeMs = dur.toInt().coerceIn(400, 2000); cfg.shopPages = max(2, cfg.shopPages)
+                              armMark(false)
+                              thread { Thread.sleep(150); swipeSync(p1, p2, cfg.swipeMs.toLong()); Thread.sleep(650); mainHandler.post { nextStep() } }
+                          }
+                      }
+                      Kind.DO -> {
+                          armMark(false)
+                          btnPrimary.text = s.btn ?: "Выполнить"
+                          btnPrimary.setOnClickListener {
+                              thread {
+                                  when (s.act) {
+                                      "plant" -> doPlant(cfg.cur)
+                                      "harvest" -> doHarvestWithRetry(cfg.cur, maxRetries = 1)
+                                      "swipe2" -> {
+                                          val sw = cfg.list(T.SWIPE)
+                                          if (sw.size >= 2) { cfg.shopPages = 3; swipeSync(sw[0], sw[1], cfg.swipeMs.toLong()); Thread.sleep(650) }
+                                      }
+                                  }
+                                  mainHandler.post { nextStep() }
+                              }
+                          }
+                          if (s.skip != null) {
+                              btnSecondary.visibility = View.VISIBLE; btnSecondary.text = s.skip
+                              btnSecondary.setOnClickListener { stepIdx = FLOW.indexOfFirst { it.role == T.CLOSE }.coerceAtLeast(stepIdx + 1); renderStep() }
+                          } else btnSecondary.visibility = View.GONE
+                      }
+                  }
+              }
+
+              private fun waitUntilGameForeground() {
+                  while (running && !gameInForeground) {
+                      status("⏸ Пауза: вернись в окно Hay Day...")
+                      sleepMs(1500L)
+                  }
+              }
+
+              private fun startLoop() {
+                  if (running) return
+                  running = true; watchdogFails = 0; gameInForeground = true; showIdleUi()
+                  worker = thread {
+                      var cycle = 0
+                      var sessionStartMs = System.currentTimeMillis()
+                      var nextBreakAfterMs = (35 + rng.nextInt(15)) * 60_000L
+
+                      while (running) {
+                          waitUntilGameForeground()
+                          if (!running) break
+
+                          // Анти-бан перерыв каждые 35–50 минут на 2–3.5 минуты
+                          if (System.currentTimeMillis() - sessionStartMs >= nextBreakAfterMs) {
+                              val breakSec = 120 + rng.nextInt(90)
+                              for (s in breakSec downTo 1) {
+                                  if (!running) break
+                                  status("☕ Анти-бан перерыв: ${s}с...")
+                                  sleepMs(1000L)
+                              }
+                              sessionStartMs = System.currentTimeMillis()
+                              nextBreakAfterMs = (35 + rng.nextInt(15)) * 60_000L
+                          }
+
+                          cycle++
+                          for (f in 0 until cfg.fieldCount) {
+                              if (!running) break
+                              waitUntilGameForeground()
+
+                              val gain = cfg.cells * cfg.perCell
+                              if (cfg.barnCap > 0 && cfg.barnUsed + gain > cfg.barnCap - SILO_MARGIN) {
+                                  status("Силос (${cfg.barnUsed}/${cfg.barnCap}) -> Разгрузка перед сбором...")
+                                  sellInShop(gain)
+                              }
+
+                              // Умный сбор: если пшеница чуть опоздала или выскочил попап, ждет и повторяет, а не сеет вслепую!
+                              status("Круг $cycle: сбор поля ${f + 1}...")
+                              val harvested = doHarvestWithRetry(f, maxRetries = 5)
+                              if (harvested && cfg.cells > 0) {
+                                  cfg.barnUsed = min(if (cfg.barnCap > 0) cfg.barnCap else Int.MAX_VALUE, cfg.barnUsed + gain)
+                              }
+                              sleepMs(Geo.jitterDelay(550))
+                              if (!running) break
+
+                              status("Круг $cycle: посев поля ${f + 1}...")
+                              if (doPlant(f) && cfg.cells > 0) {
+                                  cfg.barnUsed = max(0, cfg.barnUsed - cfg.cells)
+                              }
+                              val plantedAt = System.currentTimeMillis()
+                              if (!running) break
+
+                              val nearFull = cfg.barnCap > 0 && (cfg.barnUsed + gain > cfg.barnCap - SILO_MARGIN)
+                              if ((nearFull || cycle % cfg.sellEvery == 0) && cfg.first(T.SHOP, 0) != null) {
+                                  status("Продажа в лавке во время роста пшеницы...")
+                                  sellInShop(if (nearFull) gain else cfg.perSlot * 2)
+                              }
+
+                              val growMs = cfg.grow(f) * 1000L
+                              while (running) {
+                                  val rem = ((growMs - (System.currentTimeMillis() - plantedAt)) / 1000L).coerceAtLeast(0L)
+                                  if (rem <= 0L) break
+                                  status("⏳ Поле ${f + 1} рост: ${rem}с | Силос: ${cfg.barnUsed}/${cfg.barnCap}")
+                                  sleepMs(1000L)
+                              }
+                          }
+                      }
+                      mainHandler.post { showIdleUi() }
+                  }
+              }
+
+              fun stopBot() { running = false; worker?.interrupt(); worker = null; showIdleUi() }
+              private fun status(s: String) { mainHandler.post { if (running) tvStatus.text = s } }
+
+              private fun doPlant(f: Int): Boolean {
+                  waitUntilGameForeground()
+                  val fp = cfg.first(T.FIELD, f) ?: return false
+                  val wp = cfg.first(T.WHEAT, f) ?: return false
+                  val area = cfg.list(T.AREA, f)
+                  if (area.size < 4) return false
+
+                  tapSync(Geo.jitterTap(fp))
+                  sleepMs(Geo.jitterDelay(750, cfg.speedPlant))
+                  val dm = resources.displayMetrics
+                  val rawSnake = Geo.zigzagFrom(area, cfg.rowGap.toFloat(), fp, dm.widthPixels, dm.heightPixels, cfg.edgePct)
+                  val snake = Geo.applyPlantMode(rawSnake, cfg.plantMode, dm.widthPixels, dm.heightPixels, cfg.edgePct)
+
+                  holdSweepReturnSync(wp, fp, snake, Geo.jitterDelay(cfg.holdMs.toLong(), cfg.speedPlant), cfg.speedPlant, cfg.returnHand > 0)
+                  lockGround()
+                  return true
+              }
+
+              /**
+               * Ждет созревания и проверяет серп (до maxRetries попыток),
+               * закрывая случайные попапы при промахе проверки.
+               */
+              private fun doHarvestWithRetry(f: Int, maxRetries: Int): Boolean {
+                  val hp = cfg.first(T.HFIELD, f) ?: cfg.first(T.FIELD, f) ?: return false
+                  val sp = cfg.first(T.SICKLE, f) ?: return false
+                  val area = cfg.list(T.AREA, f)
+                  if (area.size < 4) return false
+
+                  for (attempt in 1..maxRetries) {
+                      if (!running && maxRetries > 1) return false
+                      waitUntilGameForeground()
+
+                      var fieldReady = true
+                      cfg.getRef(T.HFIELD, f)?.let { ref ->
+                          if (cfg.useRec) takeScreen()?.let { bmp ->
+                              fieldReady = Vision.matchesColor(bmp, hp, ref, 58.0)
+                              bmp.recycle()
+                          }
+                      }
+
+                      if (fieldReady) {
+                          tapSync(Geo.jitterTap(hp))
+                          sleepMs(Geo.jitterDelay(750, cfg.speedHarvest))
+
+                          var sickleReady = true
+                          cfg.getRef(T.SICKLE, f)?.let { sRef ->
+                              if (cfg.useRec) takeScreen()?.let { bmp ->
+                                  sickleReady = Vision.matchesColor(bmp, sp, sRef, 60.0)
+                                  bmp.recycle()
+                              }
+                          }
+
+                          if (sickleReady) {
+                              watchdogFails = 0
+                              val dm = resources.displayMetrics
+                              val rawSnake = Geo.zigzagFrom(area, cfg.rowGap.toFloat(), hp, dm.widthPixels, dm.heightPixels, cfg.edgePct)
+                              val snake = Geo.applyPlantMode(rawSnake, cfg.plantMode, dm.widthPixels, dm.heightPixels, cfg.edgePct)
+                              holdSweepReturnSync(sp, hp, snake, Geo.jitterDelay(cfg.holdMs.toLong(), cfg.speedHarvest), cfg.speedHarvest, cfg.returnHand > 0)
+                              lockGround()
+
+                              // Если после взмаха серпом выскочило окно переполнения силоса (виден крестик CLOSE)
+                              val closePt = cfg.first(T.CLOSE, 0)
+                              val refClose = cfg.getRef(T.CLOSE, 0)
+                              if (cfg.useRec && closePt != null && refClose != null) {
+                                  takeScreen()?.let { bmp ->
+                                      val popup = Vision.matchesColor(bmp, closePt, refClose, 48.0)
+                                      bmp.recycle()
+                                      if (popup) {
+                                          status("⚠ Силос переполнился во время сбора! Разгружаю...")
+                                          tapSync(Geo.jitterTap(closePt))
+                                          sleepMs(600L)
+                                          if (cfg.barnCap > 0) cfg.barnUsed = cfg.barnCap
+                                          sellInShop(cfg.cells * cfg.perCell)
+                                      }
+                                  }
+                              }
+                              return true
+                          }
+                      }
+
+                      if (attempt < maxRetries) {
+                          onFail("Ожидание созревания / закрытие попапа ($attempt/$maxRetries)")
+                          sleepMs(5500L)
+                      }
+                  }
+                  return false
+              }
+
+              private fun lockGround() {
+                  val gp = cfg.first(T.GROUND, 0) ?: return
+                  sleepMs(40L)
+                  holdPointSync(Geo.jitterTap(gp), Geo.jitterDelay(cfg.groundMs.toLong()))
+                  sleepMs(100L)
+              }
+
+              private fun sellInShop(targetFree: Int) {
+                  waitUntilGameForeground()
+                  val shopPt = cfg.first(T.SHOP, 0) ?: return
+                  val putPt = cfg.first(T.PUT, 0) ?: return
+                  val closePt = cfg.first(T.CLOSE, 0) ?: return
+                  val spShop = cfg.speedShop
+
+                  tapSync(Geo.jitterTap(shopPt))
+                  sleepMs(Geo.jitterDelay(950, spShop))
+
+                  val wpat = cfg.getWheatPatch()
+                  val cands = cfg.list(T.ITEMS, 0).ifEmpty { cfg.list(T.ITEM, 0) }
+                  val extras = cfg.list(T.EXTRA, 0)
+                  val adPt = cfg.first(T.AD, 0)
+                  val refPut = cfg.getRef(T.PUT, 0)
+                  var sold = 0
+                  val pages = cfg.shopPages.coerceIn(1, 6)
+
+                  loop@ for (pg in 0 until pages) {
+                      if (!running) break
+                      val slots = when (pg) {
+                          0 -> cfg.list(T.SLOT, 0)
+                          1 -> cfg.list(T.SLOT2, 0).ifEmpty { cfg.list(T.SLOT, 0) }
+                          else -> cfg.list(T.SLOT3, 0).ifEmpty { cfg.list(T.SLOT2, 0).ifEmpty { cfg.list(T.SLOT, 0) } }
+                      }
+                      for ((idx, sl) in slots.withIndex()) {
+                          if (!running || cfg.barnUsed < cfg.perSlot) break@loop
+                          waitUntilGameForeground()
+
+                          tapSync(Geo.jitterTap(sl))
+                          sleepMs(Geo.jitterDelay(420, spShop))
+                          var open = checkPutVisible(putPt, refPut)
+                          if (!open) {
+                              tapSync(Geo.jitterTap(sl))
+                              sleepMs(Geo.jitterDelay(480, spShop))
+                              open = checkPutVisible(putPt, refPut)
+                          }
+                          if (!open) continue
+
+                          var cropPt: P? = cfg.first(T.ITEM, 0)
+                          if (cands.isNotEmpty() && wpat != null) {
+                              takeScreen()?.let { bmp ->
+                                  cropPt = Vision.findBestCropCell(bmp, cands, wpat, 82.0)
+                                  bmp.recycle()
+                              }
+                          }
+                          if (cropPt == null) {
+                              // Пшеница не найдена на текущем экране — закрываем окно выбора слота
+                              tapSync(Geo.jitterTap(closePt)); sleepMs(450L); break@loop
+                          }
+                          tapSync(Geo.jitterTap(cropPt!!))
+                          sleepMs(Geo.jitterDelay(380, spShop))
+                          for (ex in extras) { tapSync(Geo.jitterTap(ex)); sleepMs(Geo.jitterDelay(250, spShop)) }
+
+                          val nextSold = sold + cfg.perSlot
+                          val nextRem = cfg.barnUsed - cfg.perSlot
+                          val isLastSlot = (pg == pages - 1 && idx == slots.size - 1) || (nextSold >= targetFree) || (nextRem < cfg.perSlot)
+                          val now = System.currentTimeMillis()
+                          if (isLastSlot && adPt != null && (now - lastAdMs >= AD_COOLDOWN_MS)) {
+                              tapSync(Geo.jitterTap(adPt))
+                              sleepMs(Geo.jitterDelay(320, spShop))
+                              lastAdMs = System.currentTimeMillis()
+                          }
+
+                          tapSync(Geo.jitterTap(putPt))
+                          sleepMs(Geo.jitterDelay(520, spShop))
+                          cfg.barnUsed = max(0, cfg.barnUsed - cfg.perSlot)
+                          sold += cfg.perSlot
+                          if (nextSold >= targetFree) break@loop
+                      }
+                      if (pg + 1 < pages) {
+                          val sw = cfg.list(T.SWIPE, 0)
+                          if (sw.size >= 2) { swipeSync(sw[0], sw[1], cfg.swipeMs.toLong()); sleepMs(Geo.jitterDelay(550, spShop)) } else break
+                      }
+                  }
+                  tapSync(Geo.jitterTap(closePt))
+                  sleepMs(Geo.jitterDelay(550, spShop))
+                  lockGround()
+              }
+
+              private fun checkPutVisible(putPt: P, refPut: Int?): Boolean {
+                  if (!cfg.useRec || refPut == null) return true
+                  val bmp = takeScreen() ?: return true
+                  val ok = Vision.matchesColor(bmp, putPt, refPut, 52.0)
+                  bmp.recycle()
+                  return ok
+              }
+
+              private fun onFail(msg: String) {
+                  watchdogFails++
+                  status("⚠ $msg")
+                  if (watchdogFails >= 2) {
+                      cfg.first(T.CLOSE, 0)?.let { tapSync(Geo.jitterTap(it)); sleepMs(650L) }
+                      lockGround()
+                      watchdogFails = 0
+                  }
+              }
+
+              private fun tapSync(p: P): Boolean {
+                  val path = Path().apply { moveTo(p.x, p.y) }
+                  return dispatchSync(GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0L, 55L)).build())
+              }
+
+              private fun holdPointSync(p: P, ms: Long): Boolean {
+                  val path = Path().apply { moveTo(p.x, p.y); lineTo(p.x + 0.5f, p.y + 0.5f) }
+                  return dispatchSync(GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0L, ms.coerceIn(100L, 10000L))).build())
+              }
+
+              private fun swipeSync(p1: P, p2: P, ms: Long): Boolean {
+                  val path = Path().apply { moveTo(p1.x, p1.y); lineTo(p2.x, p2.y) }
+                  return dispatchSync(GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0L, ms.coerceIn(150L, 5000L))).build())
+              }
+
+              private fun holdSweepReturnSync(icon: P, start: P, snake: List<P>, holdMs: Long, speedPct: Int, ret: Boolean): Boolean {
+                  if (snake.isEmpty()) return false
+                  val dist = buildList { add(icon); add(start); addAll(snake); if (ret) add(start) }
+                      .zipWithNext { a, b -> hypot(b.x - a.x, b.y - a.y) }.sum()
+                  val baseSweep = (dist / 1.4f) * (100f / speedPct.coerceIn(50, 200))
+                  val sweepMs = baseSweep.toLong().coerceIn(850L, 12000L)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val p1 = Path().apply { moveTo(icon.x, icon.y); lineTo(icon.x + 1f, icon.y + 1f) }
+                      val s1 = GestureDescription.StrokeDescription(p1, 0L, holdMs.coerceIn(150L, 3000L), true)
+                      if (!dispatchSync(GestureDescription.Builder().addStroke(s1).build())) return false
+                      val p2 = Path().apply {
+                          moveTo(icon.x + 1f, icon.y + 1f); lineTo(start.x, start.y)
+                          for (pt in snake) lineTo(pt.x, pt.y)
+                          if (ret) lineTo(start.x, start.y)
+                      }
+                      val s2 = s1.continueStroke(p2, 0L, sweepMs, false)
+                      return dispatchSync(GestureDescription.Builder().addStroke(s2).build())
+                  } else {
+                      val pf = Path().apply {
+                          moveTo(icon.x, icon.y); lineTo(start.x, start.y)
+                          for (pt in snake) lineTo(pt.x, pt.y)
+                          if (ret) lineTo(start.x, start.y)
+                      }
+                      return dispatchSync(GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(pf, 0L, holdMs + sweepMs)).build())
+                  }
+              }
+
+              private fun dispatchSync(g: GestureDescription): Boolean {
+                  val l = CountDownLatch(1); var ok = false
+                  if (!dispatchGesture(g, object : GestureResultCallback() {
+                      override fun onCompleted(gestureDescription: GestureDescription?) { ok = true; l.countDown() }
+                      override fun onCancelled(gestureDescription: GestureDescription?) { l.countDown() }
+                  }, mainHandler)) return false
+                  runCatching { l.await(15, TimeUnit.SECONDS) }
+                  return ok
+              }
+
+              private fun takeScreen(): Bitmap? {
+                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+                  val l = CountDownLatch(1); var res: Bitmap? = null
+                  takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+                      override fun onSuccess(s: ScreenshotResult) {
+                          runCatching {
+                              val hw = Bitmap.wrapHardwareBuffer(s.hardwareBuffer, s.colorSpace)
+                              res = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                              hw?.recycle(); s.hardwareBuffer.close()
+                          }
+                          l.countDown()
+                      }
+                      override fun onFailure(errorCode: Int) { l.countDown() }
+                  })
+                  runCatching { l.await(4, TimeUnit.SECONDS) }
+                  return res
+              }
+
+              private fun sleepMs(ms: Long) { try { Thread.sleep(ms.coerceAtLeast(10L)) } catch (_: InterruptedException) {} }
+          }
+          """)
+
+          write_file("app/src/main/java/com/example/haybot/MainActivity.kt", """
+          package com.example.haybot
+
+          import android.app.Activity
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.text.InputType
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+              private lateinit var cfg: Cfg
+              private lateinit var tvState: TextView
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  cfg = Cfg(this)
+                  val scroll = ScrollView(this).apply { setBackgroundColor(0xFF141418.toInt()) }
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(36, 40, 36, 40) }
+                  scroll.addView(root)
+
+                  root.addView(TextView(this).apply { text = "🌾 TapTapBot Pro — Hay Day"; textSize = 20f; setTextColor(Color.parseColor("#FFCA28")) })
+                  tvState = TextView(this).apply { textSize = 13f; setPadding(0, 12, 0, 16) }
+                  root.addView(tvState)
+
+                  root.addView(Button(this).apply {
+                      text = "1. Включить Спец. Возможности"
+                      setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                  })
+                  root.addView(Button(this).apply {
+                      text = "2. Открыть Hay Day"
+                      setOnClickListener {
+                          packageManager.getLaunchIntentForPackage("com.supercell.hayday")?.let { startActivity(it) }
+                              ?: Toast.makeText(this@MainActivity, "Hay Day не установлен", Toast.LENGTH_SHORT).show()
+                      }
+                  })
+
+                  fun num(lbl: String, init: Int): EditText {
+                      root.addView(TextView(this).apply { text = lbl; setTextColor(0xFFCCCCCC.toInt()); setPadding(0, 14, 0, 2) })
+                      return EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setTextColor(Color.WHITE); setText(init.toString()); root.addView(this) }
+                  }
+
+                  val eFields = num("Количество полей (1..4):", cfg.fieldCount)
+                  val eCells = num("Количество грядок на поле (cells):", cfg.cells)
+                  val eUsed = num("Занято в силосной башне сейчас:", cfg.barnUsed)
+                  val eCap = num("Лимит силосной башни:", cfg.barnCap)
+                  val eGrow = num("Время роста пшеницы (сек):", cfg.grow(0))
+                  val eGap = num("Шаг змейки (rowGap 15..150):", cfg.rowGap)
+                  val eEdge = num("Отступ от краев экрана (edgePct 0..25%):", cfg.edgePct)
+                  val eMode = num("Режим пальца (0-плавно, 1-медленно, 2-шаги, 3-человек):", cfg.plantMode)
+                  val eSpPlant = num("Скорость посева (50..200%):", cfg.speedPlant)
+                  val eSpHarv = num("Скорость сбора (50..200%):", cfg.speedHarvest)
+                  val eSpShop = num("Скорость лавки (50..300%):", cfg.speedShop)
+                  val eGround = num("Зажатие земли после посева (тормоз камеры, мс):", cfg.groundMs)
+
+                  root.addView(Button(this).apply {
+                      text = "💾 Сохранить все настройки"
+                      setOnClickListener {
+                          eFields.text.toString().toIntOrNull()?.let { cfg.fieldCount = it }
+                          eCells.text.toString().toIntOrNull()?.let { cfg.cells = it }
+                          eUsed.text.toString().toIntOrNull()?.let { cfg.barnUsed = it }
+                          eCap.text.toString().toIntOrNull()?.let { cfg.barnCap = it }
+                          eGrow.text.toString().toIntOrNull()?.let { cfg.setGrow(it, 0) }
+                          eGap.text.toString().toIntOrNull()?.let { cfg.rowGap = it }
+                          eEdge.text.toString().toIntOrNull()?.let { cfg.edgePct = it }
+                          eMode.text.toString().toIntOrNull()?.let { cfg.plantMode = it }
+                          eSpPlant.text.toString().toIntOrNull()?.let { cfg.speedPlant = it }
+                          eSpHarv.text.toString().toIntOrNull()?.let { cfg.speedHarvest = it }
+                          eSpShop.text.toString().toIntOrNull()?.let { cfg.speedShop = it }
+                          eGround.text.toString().toIntOrNull()?.let { cfg.groundMs = it }
+                          Toast.makeText(this@MainActivity, "Сохранено!", Toast.LENGTH_SHORT).show()
+                      }
+                  })
+
+                  root.addView(Button(this).apply {
+                      text = "📋 Экспорт профиля в буфер (JSON)"
+                      setOnClickListener {
+                          val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                          cm.setPrimaryClip(ClipData.newPlainText("haybot_pro", cfg.exportJson()))
+                          Toast.makeText(this@MainActivity, "Профиль скопирован в буфер", Toast.LENGTH_SHORT).show()
+                      }
+                  })
+
+                  root.addView(Button(this).apply {
+                      text = "📥 Импорт профиля из буфера (JSON)"
+                      setOnClickListener {
+                          val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                          val s = cm.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+                          if (cfg.importJson(s)) {
+                              Toast.makeText(this@MainActivity, "Профиль загружен!", Toast.LENGTH_SHORT).show()
+                              recreate()
+                          } else {
+                              Toast.makeText(this@MainActivity, "Неверный JSON в буфере", Toast.LENGTH_SHORT).show()
+                          }
+                      }
+                  })
+
+                  setContentView(scroll)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  val on = BotService.instance != null
+                  tvState.text = if (on) "🟢 Служба активна (панель поверх игры включена)"
+                  else "🔴 Служба выключена. На Android 13/14: Настройки -> Приложения -> TapTapBot Pro -> ⋮ (три точки в углу) -> Разрешить ограниченные настройки."
+                  tvState.setTextColor(if (on) Color.GREEN else Color.parseColor("#FF7043"))
+              }
+          }
+          """)
+          EOF
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle 8.5
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+
+      - name: Compile Debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Upload Ready APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: HayBot-Pro-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
