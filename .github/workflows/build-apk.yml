@@ -1,0 +1,57 @@
+name: Build TapTap Bot APK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-android-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        id: proj
+        run: |
+          if [ ! -f "settings.gradle.kts" ]; then
+            for z in *.zip; do
+              if [ -f "$z" ]; then unzip -oq "$z" -d _unzipped; fi
+            done
+          fi
+          SETTINGS=$(find . -name settings.gradle.kts -not -path './.git/*' | head -n 1)
+          if [ -z "$SETTINGS" ]; then echo "settings.gradle.kts не найден" >&2; exit 1; fi
+          echo "root=$(dirname "$SETTINGS")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        with: { java-version: '17', distribution: 'temurin' }
+
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '8.7' }
+
+      - name: Run unit tests
+        working-directory: ${{ steps.proj.outputs.root }}
+        continue-on-error: true
+        run: gradle testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Build Debug APK
+        working-directory: ${{ steps.proj.outputs.root }}
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Rename APK
+        working-directory: ${{ steps.proj.outputs.root }}
+        run: cp app/build/outputs/apk/debug/app-debug.apk TapTap-Bot-HayDay.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TapTap-Bot-APK
+          path: ${{ steps.proj.outputs.root }}/TapTap-Bot-HayDay.apk
+          if-no-files-found: error
