@@ -16,27 +16,43 @@ jobs:
   build-android-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
 
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Если вместо исходников залит ZIP, распаковываем его и находим корень проекта.
       - name: Locate project root
         id: proj
         run: |
           if [ ! -f "settings.gradle.kts" ]; then
             for z in *.zip; do
-              if [ -f "$z" ]; then unzip -oq "$z" -d _unzipped; fi
+              if [ -f "$z" ]; then
+                unzip -oq "$z" -d _unzipped
+              fi
             done
           fi
           SETTINGS=$(find . -name settings.gradle.kts -not -path './.git/*' | head -n 1)
-          if [ -z "$SETTINGS" ]; then echo "settings.gradle.kts не найден" >&2; exit 1; fi
-          echo "root=$(dirname "$SETTINGS")" >> "$GITHUB_OUTPUT"
+          if [ -z "$SETTINGS" ]; then
+            echo "settings.gradle.kts не найден, проверьте, что проект залит целиком" >&2
+            exit 1
+          fi
+          ROOT=$(dirname "$SETTINGS")
+          echo "Project root: $ROOT"
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-java@v4
-        with: { java-version: '17', distribution: 'temurin' }
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-      - uses: gradle/actions/setup-gradle@v4
-        with: { gradle-version: '8.7' }
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
 
+      # Тесты не мешают получить APK, но их результат виден в логе.
       - name: Run unit tests
         working-directory: ${{ steps.proj.outputs.root }}
         continue-on-error: true
@@ -44,14 +60,43 @@ jobs:
 
       - name: Build Debug APK
         working-directory: ${{ steps.proj.outputs.root }}
-        run: gradle assembleDebug --no-daemon --stacktrace
+        shell: bash
+        run: gradle assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
+
+      # Если сборка упала: выводим ошибки компиляции прямо на страницу запуска (раздел Summary).
+      - name: Show compile errors
+        if: failure()
+        working-directory: ${{ steps.proj.outputs.root }}
+        run: |
+          {
+            echo '## Ошибки сборки'
+            echo '```'
+            grep -E '^e: |What went wrong|error:' -A4 build.log | head -n 80
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ steps.proj.outputs.root }}/build.log
 
       - name: Rename APK
         working-directory: ${{ steps.proj.outputs.root }}
         run: cp app/build/outputs/apk/debug/app-debug.apk TapTap-Bot-HayDay.apk
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload Ready APK
+        uses: actions/upload-artifact@v4
         with:
           name: TapTap-Bot-APK
           path: ${{ steps.proj.outputs.root }}/TapTap-Bot-HayDay.apk
           if-no-files-found: error
+          retention-days: 30
+
+      # При пуше тега вида v3.0.0 APK прикрепляется к GitHub Release.
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.proj.outputs.root }}/TapTap-Bot-HayDay.apk
